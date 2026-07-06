@@ -37,6 +37,10 @@ class JetKVMError(RuntimeError):
     pass
 
 
+class JetKVMDisconnected(JetKVMError):
+    """The peer connection died (device reboot, network loss)."""
+
+
 class JetKVMClient:
     def __init__(self, base_url: str, password: str = "", verify_tls: bool = False):
         self.base_url = base_url.rstrip("/")
@@ -90,6 +94,11 @@ class JetKVMClient:
             log.info("pc state: %s", pc.connectionState)
             if pc.connectionState in ("failed", "closed"):
                 self._rpc_open.clear()
+                # fail in-flight calls immediately instead of letting them hit the 30s timeout
+                for fut in self._pending.values():
+                    if not fut.done():
+                        fut.set_exception(JetKVMDisconnected(f"connection {pc.connectionState}"))
+                self._pending.clear()
 
         await pc.setLocalDescription(await pc.createOffer())
         await self._wait_ice_complete(pc)
@@ -118,10 +127,27 @@ class JetKVMClient:
         log.info("JetKVM rpc channel open")
         asyncio.ensure_future(self._kick_until_first_frame())
 
+    @property
+    def connected(self) -> bool:
+        """True while the peer connection and rpc channel are actually usable."""
+        return (
+            self._pc is not None
+            and self._pc.connectionState == "connected"
+            and self._rpc is not None
+            and self._rpc.readyState == "open"
+            and self._rpc_open.is_set()
+        )
+
     async def close(self) -> None:
         if self._pc:
-            await self._pc.close()
-        await self._http.aclose()
+            try:
+                await self._pc.close()
+            except Exception:
+                pass  # closing a dead connection must never raise
+        try:
+            await self._http.aclose()
+        except Exception:
+            pass
 
     @staticmethod
     async def _wait_ice_complete(pc: RTCPeerConnection) -> None:
@@ -170,6 +196,30 @@ class JetKVMClient:
             req["params"] = params
         self._rpc.send(json.dumps(req))
         return await asyncio.wait_for(fut, timeout=30)
+
+    async def ping(self, timeout: float = 3.0) -> bool:
+        """True if the device answers on the rpc channel right now.
+
+        Any response — even a JSON-RPC error — proves the channel round-trips;
+        only silence or a dead connection counts as failure. Much faster death
+        detection than waiting ~30s for WebRTC consent expiry."""
+        if not self.connected:
+            return False
+        self._next_id += 1
+        rid = self._next_id
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending[rid] = fut
+        try:
+            self._rpc.send(json.dumps({"jsonrpc": "2.0", "method": "ping", "id": rid}))
+            await asyncio.wait_for(fut, timeout=timeout)
+            return True
+        except JetKVMDisconnected:
+            return False
+        except JetKVMError:
+            return True  # an error response still came over a working channel
+        except Exception:
+            self._pending.pop(rid, None)
+            return False
 
     # ---------- video / snapshot --------------------------------------------
 

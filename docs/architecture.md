@@ -43,8 +43,19 @@ firmware and treats this client exactly like its own web UI.
    futures; id-less messages are server-initiated events (e.g. `otherSessionConnected`) and
    are ignored.
 
-There is no reconnect logic yet: if the peer connection drops, the next tool call fails and a
-new server process / connection is needed.
+### Reconnect / device restarts
+
+The server keeps one cached connection, and every tool call health-checks it first:
+`kvm()` sends an RPC `ping` with a 3 s timeout (any response — even a JSON-RPC error —
+proves the channel round-trips; `JetKVMDisconnected` or silence means dead). On failure it
+closes the old client and builds a fresh connection, so a JetKVM reboot or network blip
+heals transparently on the next tool call — no server restart needed. When the peer
+connection dies, all in-flight RPCs are failed immediately with `JetKVMDisconnected`
+instead of waiting out their 30 s timeouts.
+
+Measured against a real device reboot: the first tool call issued mid-reboot detects the
+dead session in ~3 s, reconnects as soon as the device is back, and returns a fresh frame
+— ~17 s end to end, dominated by the device's own boot time.
 
 ## Video: the keyframe/PLI story (the trap)
 

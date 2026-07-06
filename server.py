@@ -35,9 +35,16 @@ _lock = asyncio.Lock()
 
 
 async def kvm() -> JetKVMClient:
-    """Lazily establish (and reuse) one connection to the device."""
+    """Lazily establish (and reuse) one connection to the device.
+
+    If the connection died (device reboot, network blip), tear it down and build a
+    fresh one — tool calls transparently recover instead of failing forever."""
     global _client
     async with _lock:
+        if _client is not None and not await _client.ping():
+            logging.warning("JetKVM connection is dead; reconnecting")
+            await _client.close()
+            _client = None
         if _client is None:
             url = os.environ.get("JETKVM_URL")
             if not url:
@@ -47,7 +54,11 @@ async def kvm() -> JetKVMClient:
                 password=os.environ.get("JETKVM_PASSWORD", ""),
                 verify_tls=os.environ.get("JETKVM_VERIFY_TLS", "").lower() == "true",
             )
-            await c.connect()
+            try:
+                await c.connect()
+            except Exception:
+                await c.close()  # don't leak a half-open connection; next call retries
+                raise
             _client = c
         return _client
 
