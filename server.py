@@ -67,8 +67,9 @@ async def kvm() -> JetKVMClient:
 
 @mcp.tool()
 async def screenshot() -> Image:
-    """Capture the target machine's current screen as a JPEG. Coordinates for
-    click/move are pixel coordinates on the image this returns."""
+    """Capture the target machine's current screen as a JPEG, cropped to the
+    visible desktop (letterbox bars from underscanning hosts are removed).
+    Coordinates for click/move are pixel coordinates on the image this returns."""
     c = await kvm()
     data, w, h = await c.snapshot()
     return Image(data=data, format="jpeg")

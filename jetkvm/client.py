@@ -58,6 +58,7 @@ class JetKVMClient:
         self._frame_event = asyncio.Event()
         self._last_frame_at = 0.0  # monotonic time of the last decoded frame
         self._last_dims = (0, 0)  # (w, h) of the most recent snapshot we handed out
+        self._content_box = None  # (l, t, r, b) of the desktop inside the frame, if letterboxed
         self._video_receiver = None
         self._video_ssrcs: set[int] = set()
 
@@ -274,11 +275,53 @@ class JetKVMClient:
                 log.warning("no fresh frame after keyframe request; using last frame")
         frame = self._latest_frame
         img = frame.to_image()  # PIL.Image via PyAV
+        self._last_dims = img.size
+        box = self._detect_content_box(img)
+        if box is not None:
+            cur = self._content_box
+            # codec noise wobbles edges by a pixel; only recalibrate on real change
+            if cur is None or any(abs(a - b) > 2 for a, b in zip(box, cur)):
+                log.info("content box calibrated: %s in %sx%s frame", box, *img.size)
+                self._content_box = box
+        if self._content_box:
+            img = img.crop(self._content_box)
         w, h = img.size
-        self._last_dims = (w, h)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality)
         return buf.getvalue(), w, h
+
+    @staticmethod
+    def _detect_content_box(img) -> tuple[int, int, int, int] | None:
+        """Locate the desktop inside a frame that may carry black letterbox bars
+        (hosts that underscan their HDMI output). Returns a crop box; the full
+        frame when no bars are present; None when the frame is too dark to
+        judge, so the caller keeps its previous calibration.
+
+        Mouse math depends on this: the HID absolute range maps to the host's
+        desktop, which is exactly the content box — not the full frame."""
+        fw, fh = img.size
+        g = img.convert("L")
+        corners = [g.getpixel(p) for p in ((0, 0), (fw - 1, 0), (0, fh - 1), (fw - 1, fh - 1))]
+        black = max(corners)
+        if black > 32:
+            return (0, 0, fw, fh)  # bright corners: no bars
+        bbox = g.point(lambda p: 255 if p > black + 8 else 0).getbbox()
+        if bbox is None:
+            return None  # all-dark frame (host asleep, fullscreen console): can't judge
+
+        # Real letterboxing is roughly centered. A one-sided "bar" is dark UI
+        # (console text, dark windows) — don't trim that axis.
+        def _axis(lo: int, hi: int, size: int) -> tuple[int, int]:
+            near, far = lo, size - hi
+            if min(near, far) < 3 or max(near, far) > 3 * min(near, far) + 8:
+                return 0, size
+            return lo, hi
+
+        l, r = _axis(bbox[0], bbox[2], fw)
+        t, b = _axis(bbox[1], bbox[3], fh)
+        if (r - l) < fw * 0.6 or (b - t) < fh * 0.6:
+            return None  # implausible shrink: dark content, not bars
+        return (l, t, r, b)
 
     async def _dims(self) -> tuple[int, int]:
         if self._last_dims != (0, 0):
@@ -295,9 +338,17 @@ class JetKVMClient:
     # ---------- input plane (the "hands") -----------------------------------
 
     async def _abs(self, px: int, py: int, buttons: int) -> None:
-        w, h = await self._dims()
+        # px/py are pixels on the last snapshot, which is cropped to the content
+        # box; both the cropped image and the HID range span exactly the desktop.
+        if self._content_box:
+            l, t, r, b = self._content_box
+            w, h = r - l, b - t
+        else:
+            w, h = await self._dims()
         x = max(0, min(ABS_MAX, round(px / max(1, w) * ABS_MAX)))
         y = max(0, min(ABS_MAX, round(py / max(1, h) * ABS_MAX)))
+        if x == 0 and y == 0:
+            x = y = 1  # the device silently drops (0,0) absolute reports
         await self.rpc("absMouseReport", x=x, y=y, buttons=buttons)
 
     async def move(self, px: int, py: int) -> None:
