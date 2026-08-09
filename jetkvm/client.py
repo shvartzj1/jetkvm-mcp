@@ -6,9 +6,21 @@
 No firmware change is required: snapshots come from the H.264 video track that the
 device already streams, decoded locally with PyAV (an aiortc dependency).
 
-Handshake (verified against jetkvm/kvm source):
+Handshake (verified against jetkvm/kvm source and a live 0.5.x device):
   POST /auth/login-local   {"password": ...}              -> sets authToken cookie
-  POST /webrtc/session     {"sd": base64(json({type,sdp}))} -> {"sd": base64(answer)}
+
+then one of two signaling paths:
+  * websocket (firmware >= 0.5): WS /webrtc/signaling/client, JSON {type, data}
+    frames -- we send {"type":"offer","data":{"sd":base64}}, the device replies
+    with {"type":"answer","data":base64} and then *trickles* its ICE candidates
+    as {"type":"new-ice-candidate","data":RTCIceCandidateInit}.
+  * legacy: POST /webrtc/session {"sd": base64} -> {"sd": base64(answer)}
+
+Prefer the websocket. The legacy answer carries no ICE candidates at all, so the
+connection can only come up if the *device* can reach the address we advertised --
+true on a LAN, false from inside a container or behind any NAT, where ICE then sits
+in "checking" forever. Consuming the trickled candidates lets us reach out instead.
+
 The device adds a video track; the client opens a reliable datachannel labelled "rpc".
 """
 
@@ -23,7 +35,9 @@ import re
 import time
 
 import httpx
+import websockets
 from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.sdp import candidate_from_sdp
 
 from . import keymap
 
@@ -61,6 +75,9 @@ class JetKVMClient:
         self._content_box = None  # (l, t, r, b) of the desktop inside the frame, if letterboxed
         self._video_receiver = None
         self._video_ssrcs: set[int] = set()
+        self._answer_sdp = ""
+        self._ws = None  # signaling websocket, kept open for late candidates
+        self._ws_task: asyncio.Task | None = None
 
     # ---------- lifecycle ----------------------------------------------------
 
@@ -110,19 +127,13 @@ class JetKVMClient:
             ).encode()
         ).decode()
 
-        r = await self._http.post("/webrtc/session", json={"sd": offer_b64})
-        if r.status_code != 200:
-            raise JetKVMError(f"webrtc/session failed: {r.status_code} {r.text}")
-        answer_b64 = r.json()["sd"]
-        answer = json.loads(base64.standard_b64decode(answer_b64))
-        await pc.setRemoteDescription(
-            RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
-        )
+        if not await self._negotiate_ws(pc, offer_b64):
+            await self._negotiate_http(pc, offer_b64)
 
         for t in pc.getTransceivers():
             if t.kind == "video" and t.receiver:
                 self._video_receiver = t.receiver
-        self._video_ssrcs = {int(s) for s in re.findall(r"^a=ssrc:(\d+)", answer["sdp"], re.M)}
+        self._video_ssrcs = {int(s) for s in re.findall(r"^a=ssrc:(\d+)", self._answer_sdp, re.M)}
 
         await asyncio.wait_for(self._rpc_open.wait(), timeout=15)
         log.info("JetKVM rpc channel open")
@@ -140,6 +151,7 @@ class JetKVMClient:
         )
 
     async def close(self) -> None:
+        await self._close_ws()
         if self._pc:
             try:
                 await self._pc.close()
@@ -149,6 +161,104 @@ class JetKVMClient:
             await self._http.aclose()
         except Exception:
             pass
+
+    # ---------- signaling -----------------------------------------------------
+
+    async def _negotiate_ws(self, pc: RTCPeerConnection, offer_b64: str) -> bool:
+        """Offer/answer over the device's signaling websocket, consuming trickled
+        ICE candidates. Returns False if the device doesn't speak it, so the
+        caller can fall back to the legacy POST."""
+        ws_url = re.sub(r"^http", "ws", self.base_url) + "/webrtc/signaling/client"
+        cookie = "; ".join(f"{k}={v}" for k, v in self._http.cookies.items())
+        try:
+            ws = await asyncio.wait_for(self._ws_connect(ws_url, cookie), timeout=10)
+        except Exception as e:
+            log.info("websocket signaling unavailable (%s); falling back to POST", e)
+            return False
+
+        answered = asyncio.Event()
+        early: list[dict] = []  # candidates that beat the answer must wait for it
+
+        async def pump() -> None:
+            async for raw in ws:
+                if raw == "pong":  # heartbeat
+                    continue
+                try:
+                    msg = json.loads(raw)
+                except (ValueError, TypeError):
+                    continue
+                kind, data = msg.get("type"), msg.get("data")
+                if kind == "answer" and not answered.is_set():
+                    answer = json.loads(base64.standard_b64decode(data))
+                    self._answer_sdp = answer["sdp"]
+                    await pc.setRemoteDescription(
+                        RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
+                    )
+                    answered.set()
+                    for c in early:
+                        await self._add_remote_candidate(pc, c)
+                    early.clear()
+                elif kind == "new-ice-candidate":
+                    if answered.is_set():
+                        await self._add_remote_candidate(pc, data)
+                    else:
+                        early.append(data)
+
+        await ws.send(json.dumps({"type": "offer", "data": {"sd": offer_b64}}))
+        self._ws = ws
+        self._ws_task = asyncio.ensure_future(pump())
+
+        try:
+            await asyncio.wait_for(answered.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            log.warning("no answer over websocket; falling back to POST")
+            await self._close_ws()
+            return False
+        # Stay subscribed: the device keeps trickling candidates after the answer,
+        # and those are the only ones a NAT'd client can actually reach it on.
+        return True
+
+    @staticmethod
+    async def _ws_connect(url: str, cookie: str):
+        headers = {"Cookie": cookie}
+        try:
+            return await websockets.connect(url, additional_headers=headers)
+        except TypeError:  # websockets < 14 spells it differently
+            return await websockets.connect(url, extra_headers=headers)
+
+    async def _negotiate_http(self, pc: RTCPeerConnection, offer_b64: str) -> None:
+        """Legacy one-shot exchange. The answer carries no candidates, so this only
+        works when the device can reach the address we advertised."""
+        r = await self._http.post("/webrtc/session", json={"sd": offer_b64})
+        if r.status_code != 200:
+            raise JetKVMError(f"webrtc/session failed: {r.status_code} {r.text}")
+        answer = json.loads(base64.standard_b64decode(r.json()["sd"]))
+        self._answer_sdp = answer["sdp"]
+        await pc.setRemoteDescription(
+            RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
+        )
+
+    @staticmethod
+    async def _add_remote_candidate(pc: RTCPeerConnection, init: dict | None) -> None:
+        raw = (init or {}).get("candidate")
+        if not raw:
+            return  # end-of-candidates sentinel
+        cand = candidate_from_sdp(raw.split(":", 1)[1] if raw.startswith("candidate:") else raw)
+        cand.sdpMid = (init or {}).get("sdpMid")
+        cand.sdpMLineIndex = (init or {}).get("sdpMLineIndex")
+        await pc.addIceCandidate(cand)
+        log.debug("added remote candidate %s:%s", cand.ip, cand.port)
+
+    async def _close_ws(self) -> None:
+        if self._ws_task:
+            self._ws_task.cancel()
+            self._ws_task = None
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
 
     @staticmethod
     async def _wait_ice_complete(pc: RTCPeerConnection) -> None:

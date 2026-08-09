@@ -137,11 +137,14 @@ docker run --rm \
   jetkvm-mcp
 ```
 
-> **Networking note:** The container needs to reach the JetKVM on your LAN. On Linux this
-> works out of the box (`--network host` is an option if the default bridge causes issues). On
-> macOS/Windows with Docker Desktop the container uses a NAT network — make sure the JetKVM
-> address is routable from inside the container (usually it is, but VPN split-tunnelling can
-> interfere).
+> **Networking note:** The container only needs to reach the JetKVM outbound — the default
+> bridge network is fine, including Docker Desktop on macOS/Windows, where the container sits
+> behind the VM's NAT. That works because the client speaks the device's websocket signaling
+> and picks up its trickled ICE candidates, so it can dial the device directly instead of
+> waiting to be dialed. (On firmware too old for websocket signaling the client falls back to
+> the legacy `POST /webrtc/session`, whose answer carries no candidates — that path needs the
+> container to be reachable *from* the device, so it wants `--network host` on Linux or a
+> non-containerized run.) VPN split-tunnelling can still get in the way.
 
 **Claude Desktop** — Docker-based config (`claude_desktop_config.json`):
 
