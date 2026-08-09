@@ -122,12 +122,15 @@ If you'd rather not set up a local Python environment, you can run the server in
 **Build the image:**
 
 ```bash
-git clone https://github.com/bachajon/jetkvm-mcp.git
+git clone https://github.com/shvartzj1/jetkvm-mcp.git
 cd jetkvm-mcp
 docker build -t jetkvm-mcp .
 ```
 
-**Run (smoke-test / one-shot):**
+The build is multi-stage — the compiler and FFmpeg headers stay in the builder, the runtime
+carries only the shared libraries — and the server runs as an unprivileged `appuser`.
+
+**Run (one-shot):**
 
 ```bash
 docker run --rm \
@@ -135,6 +138,12 @@ docker run --rm \
   -e JETKVM_PASSWORD="" \
   -e JETKVM_VERIFY_TLS=false \
   jetkvm-mcp
+```
+
+**Check connectivity** — connects, holds the session open, and grabs a few frames:
+
+```bash
+docker run --rm -e JETKVM_URL=http://192.168.1.50 -e JETKVM_PASSWORD="" jetkvm-mcp python smoke_test.py
 ```
 
 > **Networking note:** The container only needs to reach the JetKVM outbound — the default
