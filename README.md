@@ -115,6 +115,57 @@ claude mcp add jetkvm --scope user \
 Then just talk to it: *"Screenshot the machine, open a terminal, and check disk usage."*
 The AI calls `screenshot` → reasons → `click` / `type_text` → repeats.
 
+## Docker
+
+If you'd rather not set up a local Python environment, you can run the server in a container.
+
+**Build the image:**
+
+```bash
+git clone https://github.com/bachajon/jetkvm-mcp.git
+cd jetkvm-mcp
+docker build -t jetkvm-mcp .
+```
+
+**Run (smoke-test / one-shot):**
+
+```bash
+docker run --rm \
+  -e JETKVM_URL=http://192.168.1.50 \
+  -e JETKVM_PASSWORD="" \
+  -e JETKVM_VERIFY_TLS=false \
+  jetkvm-mcp
+```
+
+> **Networking note:** The container needs to reach the JetKVM on your LAN. On Linux this
+> works out of the box (`--network host` is an option if the default bridge causes issues). On
+> macOS/Windows with Docker Desktop the container uses a NAT network — make sure the JetKVM
+> address is routable from inside the container (usually it is, but VPN split-tunnelling can
+> interfere).
+
+**Claude Desktop** — Docker-based config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "jetkvm": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "JETKVM_URL=http://192.168.1.50",
+        "-e", "JETKVM_PASSWORD=",
+        "-e", "JETKVM_VERIFY_TLS=false",
+        "jetkvm-mcp"
+      ]
+    }
+  }
+}
+```
+
+The `-i` flag keeps stdin open so Claude Desktop can speak MCP over stdio to the container.
+Replace `http://192.168.1.50` with your device's address and set `JETKVM_PASSWORD` if your
+device has one.
+
 ## The killer workflow: hands-free bare-metal provisioning
 
 Device control and screen control compose into something no in-OS agent can do — installing an
