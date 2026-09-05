@@ -482,19 +482,28 @@ class JetKVMClient:
             await self.rpc("wheelReport", wheelY=step, wheelX=0)
             await asyncio.sleep(0.02)
 
-    async def type_text(self, text: str) -> None:
+    async def type_text(self, text: str, layout: str | None = None) -> list[str]:
+        """Type `text` on the target. Returns the characters the active keyboard
+        layout cannot produce — they are skipped, and the caller reports them
+        rather than letting the text silently arrive incomplete."""
+        skipped: list[str] = []
         for ch in text:
-            rep = keymap.char_to_report(ch)
-            if rep is None:
-                log.warning("skipping unmapped char %r", ch)
+            strokes = keymap.char_to_strokes(ch, layout)
+            if strokes is None:
+                log.warning(
+                    "char %r is unreachable on the %r keyboard layout; skipping",
+                    ch, layout or keymap.current_layout(),
+                )
+                skipped.append(ch)
                 continue
-            modifier, code = rep
-            await self.rpc("keyboardReport", modifier=modifier, keys=[code])
-            await self.rpc("keyboardReport", modifier=0, keys=[])
-            await asyncio.sleep(0.008)
+            for modifier, code in strokes:
+                await self.rpc("keyboardReport", modifier=modifier, keys=[code])
+                await self.rpc("keyboardReport", modifier=0, keys=[])
+                await asyncio.sleep(0.008)
+        return skipped
 
-    async def press_key(self, combo: str) -> None:
-        modifier, code = keymap.combo_to_report(combo)
+    async def press_key(self, combo: str, layout: str | None = None) -> None:
+        modifier, code = keymap.combo_to_report(combo, layout)
         await self.rpc("keyboardReport", modifier=modifier, keys=[code])
         await asyncio.sleep(0.03)
         await self.rpc("keyboardReport", modifier=0, keys=[])

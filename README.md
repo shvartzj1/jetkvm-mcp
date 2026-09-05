@@ -21,7 +21,7 @@ Works against **stock JetKVM firmware** — no modifications to the device.
 
 | Plane | Tools | Nature |
 |-------|-------|--------|
-| **Screen control** (eyes + hands) | `screenshot`, `click`, `double_click`, `move_mouse`, `type_text`, `press_key`, `scroll` | vision loop — the AI looks, then acts |
+| **Screen control** (eyes + hands) | `screenshot`, `click`, `double_click`, `move_mouse`, `type_text`, `press_key`, `keyboard_layout`, `scroll` | vision loop — the AI looks, then acts |
 | **Device control** | `mount_media_url`, `mount_media_storage`, `upload_media`, `upload_and_mount`, `unmount_media`, `list_storage`, `delete_storage_file`, `storage_space`, `virtual_media_state`, `power`, `power_state`, `dc_power`, `wake_host`, `wol`, `usb_emulation`, `video_state`, `reboot_device` | deterministic RPC |
 
 Full parameter reference: [docs/tools.md](docs/tools.md).
@@ -201,9 +201,22 @@ small recovery images.
   so this client sends PLI on connect and whenever frames go stale (`_request_keyframe` in
   `client.py`). Without that, decode fails on every packet forever
   (`avcodec_send_packet: Invalid data`). If you're building your own client: this is the trap.
-- **Keyboard layout**: `type_text` maps ASCII → USB HID usage codes assuming the **US layout**
-  on the target OS. On other layouts, shifted symbols swap (on a UK target, `"` arrives as
-  `@`). Letters, digits, and `/ - . ; =` are layout-stable; prefer them in critical commands.
+- **Keyboard layout — tell it what the target is using.** A USB keyboard sends key
+  *positions*; the character that appears is decided by the layout the **target OS** has
+  active. Mismatch it and there is no error, just the wrong character — on a German target
+  `z` arrives as `y`, `&` as `/`, `@` as `"`, which reads like a typo, not a bug. Set it:
+
+  ```
+  keyboard_layout("de")            # or JETKVM_KEYBOARD_LAYOUT=de in the server env
+  type_text("Get-ChildItem C:\\", layout="de")   # or per call
+  ```
+
+  Built in: `us` (default), `uk`, `de`, `fr` — with aliases (`German`, `en-GB`, `azerty`).
+  AltGr and the ISO 102nd key are handled, so `\ | { } [ ] @ €` are reachable on the
+  European layouts, and dead keys (`^ ´ ¨ ~`) get their trailing space automatically.
+  Anything the layout genuinely can't produce comes back in `type_text`'s return value
+  instead of being dropped silently. Adding a layout is a dozen lines in
+  `jetkvm/keymap.py` — only the keys that differ from US.
 - **Coordinates**: `click`/`move_mouse` take pixel coordinates on the most recent
   `screenshot`; the client maps them to the HID absolute range using the live frame
   dimensions, so there is no drift.
@@ -230,9 +243,10 @@ This lets a language model drive a real computer with real consequences. Recomme
 
 ```
 jetkvm/client.py   WebRTC + JSON-RPC client (connect, snapshot, HID input, uploads)
-jetkvm/keymap.py   ASCII / key-combo → USB HID usage codes
-server.py          FastMCP server exposing the 24 tools
+jetkvm/keymap.py   per-layout character / key-combo → USB HID usage codes
+server.py          FastMCP server exposing the 25 tools
 smoke_test.py      live end-to-end check against a real device
+keymap_test.py     offline check of the layout tables (no device needed)
 docs/              architecture + tool reference
 ```
 
@@ -243,7 +257,7 @@ it from a live Claude session. The RPC surface is verified against the
 
 ### Ideas / roadmap
 
-- Keyboard layout profiles for `type_text` (US hardcoded today)
+- More keyboard layouts (es, it, nordics, dvorak) — the table format is in `jetkvm/keymap.py`
 - Gate destructive tools behind an env flag
 - Native `getSnapshot` RPC upstream in the firmware would remove the H.264 decode dependency
   entirely (see jetkvm/kvm#1459)

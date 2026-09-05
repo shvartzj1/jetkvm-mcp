@@ -100,10 +100,34 @@ All input is USB HID reports over RPC — the target sees a real USB keyboard/mo
 - **Wheel** — `wheelReport(wheelY=±1)` per detent, stepped with small sleeps so the target
   registers each notch.
 - **Keyboard** — `keyboardReport(modifier, keys=[usage])` press followed by an empty report
-  (release). `keymap.py` maps ASCII and named keys/chords (`ctrl+alt+delete`, `win+r`, `f2`)
-  to usage codes, **assuming a US layout on the target OS** — on other layouts shifted
-  symbols land wrong (UK: `"` arrives as `@`). Letters, digits and `/ - . ; =` are
-  layout-stable.
+  (release). A USB keyboard transmits *key positions*, never characters: what appears is
+  whatever the target OS's active layout puts on that position. `keymap.py` therefore models
+  layouts explicitly. Physical keys are named by the character US puts on them, and each
+  layout (`us`, `uk`, `de`, `fr`) declares what its keys emit at each of the four levels —
+  plain, Shift, AltGr (`0x40`, RightAlt), Shift+AltGr. A layout table is the flattening of
+  that: character → `(modifier, usage)`, walked cheapest-level-first so a character on two
+  keys is reached with the fewest modifiers.
+
+  Three details the naive US-only mapping gets wrong:
+
+  - **AltGr.** `\ | { } [ ] @ €` live on the third level of most European layouts. Without
+    RightAlt in the modifier byte they are simply unreachable — on German, `|` is
+    AltGr + the 102nd key and `\` is AltGr + the `ß` key.
+  - **The 102nd key** (usage `0x64`), the extra key ISO keyboards have between LeftShift and
+    Z. ANSI keyboards don't have it, so a US-derived table never emits it — but German puts
+    `< > |` there and UK puts `\ |` there. The emulated gadget can send it regardless of what
+    the operator's own keyboard looks like.
+  - **Dead keys.** German `^ ´ \`` and French `^ ¨ ~ \`` emit nothing on their own; they arm an
+    accent for the next keystroke. `char_to_strokes` returns those as two strokes — the key,
+    then space — which is how the standalone character is produced.
+
+  Chords resolve their character key through the same table, so `ctrl+z` on a German target
+  presses the key that really is Z there (usage `0x1C`), not the US one. Characters the active
+  layout cannot produce are returned to the caller by `type_text` instead of being dropped
+  with only a log line — a silently truncated command is worse than a reported one.
+
+  `keymap_test.py` checks the tables offline (no device): the German expectations are the
+  ones measured on real hardware in issue #2.
 
 ## Virtual media
 

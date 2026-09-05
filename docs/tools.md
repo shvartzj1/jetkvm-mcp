@@ -1,6 +1,6 @@
 # Tool reference
 
-All 24 MCP tools exposed by `server.py`. The first tool call establishes the device
+All 25 MCP tools exposed by `server.py`. The first tool call establishes the device
 connection (expect ~3 s extra for the first `screenshot`; see
 [architecture.md](architecture.md#video-the-keyframepli-story-the-trap)).
 
@@ -12,8 +12,9 @@ connection (expect ~3 s extra for the first `screenshot`; see
 | `click` | `x`, `y`, `button="left"` | Press+release at pixel (x, y). `button`: `left` \| `right` \| `middle`. |
 | `double_click` | `x`, `y` | Two clicks, 80 ms apart. |
 | `move_mouse` | `x`, `y` | Move pointer without clicking (hover). |
-| `type_text` | `text` | Type a string on the emulated USB keyboard. US-layout mapping — see gotchas in the README. Unmapped characters are skipped with a warning. |
-| `press_key` | `combo` | A key or chord: `enter`, `esc`, `tab`, `f2`, arrow keys, `ctrl+c`, `ctrl+alt+delete`, `win+r`, `cmd+shift+4`, … |
+| `type_text` | `text`, `layout=""` | Type a string on the emulated USB keyboard, using the active keyboard layout. `layout` overrides it for one call. Characters the layout can't produce are **named in the return value**, not silently dropped. |
+| `press_key` | `combo`, `layout=""` | A key or chord: `enter`, `esc`, `tab`, `f2`, arrow keys, `ctrl+c`, `ctrl+alt+delete`, `win+r`, `cmd+shift+4`, `altgr+q`, … Character keys resolve through the active layout, so `ctrl+z` presses the target's real Z. |
+| `keyboard_layout` | `layout=""` | Read the active layout and the available ones; pass a name to switch. **The target's layout, not yours.** `us` (default), `uk`, `de`, `fr`, plus aliases (`German`, `en-GB`, `azerty`, …). |
 | `scroll` | `amount` | Wheel detents; positive = up, negative = down. |
 
 ## Virtual media

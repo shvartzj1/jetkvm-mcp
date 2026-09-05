@@ -14,6 +14,8 @@ Config via env:
   JETKVM_URL       e.g. http://192.168.1.50   (the device's address)
   JETKVM_PASSWORD  local password (omit if device is in noPassword mode)
   JETKVM_VERIFY_TLS  "true" to verify the cert (default false; device uses self-signed)
+  JETKVM_KEYBOARD_LAYOUT  layout active on the *target* OS: us (default), uk, de, fr.
+                          Wrong layout = wrong characters, silently — see keyboard_layout.
 """
 
 from __future__ import annotations
@@ -24,11 +26,16 @@ import logging
 
 from mcp.server.fastmcp import FastMCP, Image
 
-from jetkvm import JetKVMClient
+from jetkvm import JetKVMClient, keymap
 
 logging.basicConfig(level=logging.INFO)
 
 mcp = FastMCP("jetkvm")
+
+_env_layout = os.environ.get("JETKVM_KEYBOARD_LAYOUT", "").strip()
+if _env_layout:
+    keymap.set_layout(_env_layout)  # fail loudly at startup, not mid-command
+    logging.info("keyboard layout: %s", keymap.current_layout())
 
 _client: JetKVMClient | None = None
 _lock = asyncio.Lock()
@@ -97,17 +104,48 @@ async def move_mouse(x: int, y: int) -> str:
 
 
 @mcp.tool()
-async def type_text(text: str) -> str:
-    """Type a string on the target machine's emulated USB keyboard."""
-    await (await kvm()).type_text(text)
-    return f"typed {len(text)} chars"
+async def type_text(text: str, layout: str = "") -> str:
+    """Type a string on the target machine's emulated USB keyboard.
+
+    A USB keyboard sends key positions, not characters — what appears depends on
+    the keyboard layout the *target* OS has active. Set it once with
+    keyboard_layout (or JETKVM_KEYBOARD_LAYOUT); `layout` overrides it for this
+    call. Characters the layout cannot produce are reported back, not dropped
+    silently."""
+    skipped = await (await kvm()).type_text(text, layout or None)
+    active = layout or keymap.current_layout()
+    if skipped:
+        return (
+            f"typed {len(text) - len(skipped)} of {len(text)} chars ({active} layout); "
+            f"unreachable on this layout, skipped: {''.join(skipped)!r}"
+        )
+    return f"typed {len(text)} chars ({active} layout)"
 
 
 @mcp.tool()
-async def press_key(combo: str) -> str:
-    """Press a key or chord, e.g. 'enter', 'ctrl+c', 'ctrl+alt+delete', 'win+r', 'f2'."""
-    await (await kvm()).press_key(combo)
+async def press_key(combo: str, layout: str = "") -> str:
+    """Press a key or chord, e.g. 'enter', 'ctrl+c', 'ctrl+alt+delete', 'win+r', 'f2'.
+    'altgr' is available for third-level characters on non-US layouts. Character
+    keys in a chord are resolved through the active keyboard layout, so 'ctrl+z'
+    presses the key that really is Z on the target."""
+    await (await kvm()).press_key(combo, layout or None)
     return f"pressed {combo}"
+
+
+@mcp.tool()
+async def keyboard_layout(layout: str = "") -> dict:
+    """Get or set the keyboard layout the target OS is using.
+
+    Call with no argument to read the current layout and the available ones; pass
+    a name ('de', 'German', 'en-GB', …) to switch. This is the target's layout,
+    not yours — get it wrong and type_text produces plausible-looking wrong
+    characters with no error (on German, 'z' arrives as 'y')."""
+    if layout:
+        keymap.set_layout(layout)
+    return {
+        "active": keymap.current_layout(),
+        "available": keymap.available_layouts(),
+    }
 
 
 @mcp.tool()
