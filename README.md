@@ -115,6 +115,69 @@ claude mcp add jetkvm --scope user \
 Then just talk to it: *"Screenshot the machine, open a terminal, and check disk usage."*
 The AI calls `screenshot` → reasons → `click` / `type_text` → repeats.
 
+## Docker
+
+If you'd rather not set up a local Python environment, you can run the server in a container.
+
+**Build the image:**
+
+```bash
+git clone https://github.com/shvartzj1/jetkvm-mcp.git
+cd jetkvm-mcp
+docker build -t jetkvm-mcp .
+```
+
+The build is multi-stage — the compiler and FFmpeg headers stay in the builder, the runtime
+carries only the shared libraries — and the server runs as an unprivileged `appuser`.
+
+**Run (one-shot):**
+
+```bash
+docker run --rm \
+  -e JETKVM_URL=http://192.168.1.50 \
+  -e JETKVM_PASSWORD="" \
+  -e JETKVM_VERIFY_TLS=false \
+  jetkvm-mcp
+```
+
+**Check connectivity** — connects, holds the session open, and grabs a few frames:
+
+```bash
+docker run --rm -e JETKVM_URL=http://192.168.1.50 -e JETKVM_PASSWORD="" jetkvm-mcp python smoke_test.py
+```
+
+> **Networking note:** The container only needs to reach the JetKVM outbound — the default
+> bridge network is fine, including Docker Desktop on macOS/Windows, where the container sits
+> behind the VM's NAT. That works because the client speaks the device's websocket signaling
+> and picks up its trickled ICE candidates, so it can dial the device directly instead of
+> waiting to be dialed. (On firmware too old for websocket signaling the client falls back to
+> the legacy `POST /webrtc/session`, whose answer carries no candidates — that path needs the
+> container to be reachable *from* the device, so it wants `--network host` on Linux or a
+> non-containerized run.) VPN split-tunnelling can still get in the way.
+
+**Claude Desktop** — Docker-based config (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "jetkvm": {
+      "command": "docker",
+      "args": [
+        "run", "--rm", "-i",
+        "-e", "JETKVM_URL=http://192.168.1.50",
+        "-e", "JETKVM_PASSWORD=",
+        "-e", "JETKVM_VERIFY_TLS=false",
+        "jetkvm-mcp"
+      ]
+    }
+  }
+}
+```
+
+The `-i` flag keeps stdin open so Claude Desktop can speak MCP over stdio to the container.
+Replace `http://192.168.1.50` with your device's address and set `JETKVM_PASSWORD` if your
+device has one.
+
 ## The killer workflow: hands-free bare-metal provisioning
 
 Device control and screen control compose into something no in-OS agent can do — installing an
