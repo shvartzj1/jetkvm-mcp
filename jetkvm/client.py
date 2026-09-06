@@ -31,6 +31,7 @@ import base64
 import io
 import json
 import logging
+import os
 import re
 import time
 
@@ -510,18 +511,62 @@ class JetKVMClient:
 
     # ---------- media upload (HTTP streaming, keyed by uploadId) -------------
 
-    async def upload_to_storage(self, filename: str, data: bytes) -> dict:
-        """Init a storage upload via RPC, then stream the bytes to /storage/upload."""
-        res = await self.rpc("startStorageFileUpload", filename=filename, size=len(data))
-        upload_id = res.get("uploadId") if isinstance(res, dict) else None
+    async def upload_to_storage(self, local_path: str, chunk_size: int = 1 << 20) -> dict:
+        """Stream a local image into the device's storage partition, resuming a
+        transfer that was cut off earlier.
+
+        Mirrors the web UI (usb_mass_storage.go): `startStorageFileUpload` answers
+        with the upload id in `dataChannel` (older builds: `uploadId`) plus
+        `alreadyUploadedBytes`, the size of a leftover `<name>.incomplete` from an
+        interrupted attempt. The bytes then go to POST /storage/upload?uploadId=...;
+        the device appends to the partial file and renames it once the total equals
+        `size`. Reading from disk in chunks keeps multi-GB ISOs out of memory."""
+        name = os.path.basename(local_path)
+        size = os.path.getsize(local_path)
+        res = await self.rpc("startStorageFileUpload", filename=name, size=size)
+        upload_id = None
+        if isinstance(res, dict):
+            upload_id = res.get("dataChannel") or res.get("uploadId")
         if not upload_id:
-            raise JetKVMError(f"no uploadId returned: {res!r}")
+            raise JetKVMError(f"startStorageFileUpload returned no upload id: {res!r}")
+        offset = int(res.get("alreadyUploadedBytes") or 0)
+        if offset > size:
+            raise JetKVMError(
+                f"device holds a {offset}-byte partial of {name} but the local file is "
+                f"{size} bytes; delete {name}.incomplete on the device and retry"
+            )
+        if offset:
+            log.info("resuming %s from byte %d of %d", name, offset, size)
+
+        async def body():
+            sent = offset
+            mark = time.monotonic()
+            with open(local_path, "rb") as f:
+                f.seek(offset)
+                while chunk := f.read(chunk_size):
+                    sent += len(chunk)
+                    yield chunk
+                    if time.monotonic() - mark >= 30:
+                        log.info("upload %s: %.2f/%.2f GB", name, sent / 1e9, size / 1e9)
+                        mark = time.monotonic()
+
         r = await self._http.post(
             "/storage/upload",
             params={"uploadId": upload_id},
-            content=data,
-            headers={"Content-Type": "application/octet-stream"},
+            content=body(),
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(size - offset),
+            },
+            timeout=httpx.Timeout(30.0, read=600.0, write=600.0),
         )
         if r.status_code != 200:
             raise JetKVMError(f"upload failed: {r.status_code} {r.text}")
-        return {"uploadId": upload_id, "filename": filename, "bytes": len(data)}
+        listing = await self.rpc("listStorageFiles")
+        files = listing.get("files") or [] if isinstance(listing, dict) else []
+        landed = next((f for f in files if f.get("filename") == name), None)
+        if landed is None or int(landed.get("size", -1)) != size:
+            raise JetKVMError(
+                f"device accepted the upload but {name} is not listed at {size} bytes: {listing!r}"
+            )
+        return {"uploadId": upload_id, "filename": name, "bytes": size, "resumedFrom": offset}

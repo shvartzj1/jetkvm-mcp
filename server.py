@@ -179,14 +179,12 @@ async def mount_media_storage(filename: str, mode: str = "CDROM") -> str:
 
 @mcp.tool()
 async def upload_media(local_path: str) -> dict:
-    """Upload an image file from this machine to the device's local storage (init via
-    startStorageFileUpload, stream to /storage/upload). The device partition is small,
-    so this is for boot/recovery images, not full OS ISOs — for those use mount_media_url."""
-    import os.path
-    with open(local_path, "rb") as f:
-        data = f.read()
-    name = os.path.basename(local_path)
-    return await (await kvm()).upload_to_storage(name, data)
+    """Stream an image from this machine into the device's storage partition, to be
+    mounted afterwards with mount_media_storage. Reads from disk in chunks and resumes
+    an interrupted transfer, so full OS ISOs are fine as long as they fit (check
+    storage_space; ~14 GB on current hardware). Expect ~11 MB/s over the device's
+    100 Mbps port."""
+    return await (await kvm()).upload_to_storage(local_path)
 
 
 @mcp.tool()
@@ -194,14 +192,10 @@ async def upload_and_mount(local_path: str, mode: str = "CDROM") -> str:
     """Upload a local image to device storage and immediately mount it as USB media."""
     if mode not in ("CDROM", "Disk"):
         return "mode must be 'CDROM' or 'Disk'"
-    import os.path
-    with open(local_path, "rb") as f:
-        data = f.read()
-    name = os.path.basename(local_path)
     c = await kvm()
-    await c.upload_to_storage(name, data)
-    await c.rpc("mountWithStorage", filename=name, mode=mode)
-    return f"uploaded and mounted {name} as {mode}"
+    info = await c.upload_to_storage(local_path)
+    await c.rpc("mountWithStorage", filename=info["filename"], mode=mode)
+    return f"uploaded and mounted {info['filename']} as {mode}"
 
 
 @mcp.tool()
@@ -226,8 +220,8 @@ async def delete_storage_file(filename: str) -> str:
 
 @mcp.tool()
 async def storage_space() -> dict:
-    """Report free/total bytes on the device's storage partition (it's small —
-    prefer mount_media_url for full-size ISOs)."""
+    """Report free/total bytes on the device's storage partition (~14 GB on current
+    hardware); check it before upload_media."""
     return await (await kvm()).rpc("getStorageSpace")
 
 

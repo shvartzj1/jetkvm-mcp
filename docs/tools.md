@@ -23,7 +23,7 @@ connection (expect ~3 s extra for the first `screenshot`; see
 |------|------------|----------|
 | `mount_media_url` | `url`, `mode="CDROM"` | Device streams the image from a URL (HTTP range requests) and presents it to the target as USB media. `mode`: `CDROM` (read-only) \| `Disk` (writable). The path for full-size ISOs. |
 | `mount_media_storage` | `filename`, `mode="CDROM"` | Mount an image already on the device's local storage partition. |
-| `upload_media` | `local_path` | Upload a file from the workstation to device storage. The partition is small — recovery images, not OS ISOs. |
+| `upload_media` | `local_path` | Stream a file from the workstation into device storage. Resumes an interrupted transfer; full OS ISOs fit (~14 GB partition — check `storage_space`). |
 | `upload_and_mount` | `local_path`, `mode="CDROM"` | Upload, then mount, in one step. |
 | `unmount_media` | — | Eject whatever is mounted. |
 | `virtual_media_state` | — | `null` if nothing mounted, else `{source, mode, url|filename, size}`. |

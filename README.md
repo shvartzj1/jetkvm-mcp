@@ -190,9 +190,11 @@ power("reset")                                               # reboot into the i
 unmount_media()
 ```
 
-The device's own storage partition is tiny, so `mount_media_url` (the device streams the image
-over HTTP with range requests) is the right path for full-size ISOs; `upload_and_mount` is for
-small recovery images.
+The device's storage partition is ~14 GB on current hardware, so `upload_media` /
+`upload_and_mount` (streamed from disk, resumable, ~11 MB/s over the device's 100 Mbps port)
+can hold a full OS ISO and the install then runs from local flash. `mount_media_url` instead
+streams the image over HTTP with range requests — for when you'd rather host it yourself or
+the partition is full.
 
 ## Gotchas (read this before filing a bug)
 
