@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import time
 
 import httpx
@@ -60,6 +61,7 @@ class JetKVMClient:
     def __init__(self, base_url: str, password: str = "", verify_tls: bool = False):
         self.base_url = base_url.rstrip("/")
         self.password = password
+        self._verify_tls = verify_tls
         self._http = httpx.AsyncClient(
             base_url=self.base_url, verify=verify_tls, timeout=30.0, follow_redirects=True
         )
@@ -219,13 +221,24 @@ class JetKVMClient:
         # and those are the only ones a NAT'd client can actually reach it on.
         return True
 
-    @staticmethod
-    async def _ws_connect(url: str, cookie: str):
+    def _ws_ssl(self, url: str) -> ssl.SSLContext | None:
+        """TLS context for wss:// signaling — honor verify_tls exactly like the
+        HTTP client does. The device ships a self-signed cert, so without this
+        the signaling websocket dies on verification and ICE never completes."""
+        if not url.startswith("wss") or self._verify_tls:
+            return None  # ws:// needs no context; wss:// with None = library default (verify)
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    async def _ws_connect(self, url: str, cookie: str):
         headers = {"Cookie": cookie}
+        ssl_ctx = self._ws_ssl(url)
         try:
-            return await websockets.connect(url, additional_headers=headers)
+            return await websockets.connect(url, additional_headers=headers, ssl=ssl_ctx)
         except TypeError:  # websockets < 14 spells it differently
-            return await websockets.connect(url, extra_headers=headers)
+            return await websockets.connect(url, extra_headers=headers, ssl=ssl_ctx)
 
     async def _negotiate_http(self, pc: RTCPeerConnection, offer_b64: str) -> None:
         """Legacy one-shot exchange. The answer carries no candidates, so this only
