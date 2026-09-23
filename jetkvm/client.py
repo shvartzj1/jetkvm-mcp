@@ -224,21 +224,31 @@ class JetKVMClient:
     def _ws_ssl(self, url: str) -> ssl.SSLContext | None:
         """TLS context for wss:// signaling — honor verify_tls exactly like the
         HTTP client does. The device ships a self-signed cert, so without this
-        the signaling websocket dies on verification and ICE never completes."""
+        the signaling websocket dies on verification and ICE never completes.
+
+        None means "don't pass an ssl argument at all" (see _ws_connect), never
+        "pass ssl=None": websockets rejects an explicit None on a wss:// URI."""
         if not url.startswith("wss") or self._verify_tls:
-            return None  # ws:// needs no context; wss:// with None = library default (verify)
+            return None  # ws:// takes no context; verifying wss:// wants the library default
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
 
     async def _ws_connect(self, url: str, cookie: str):
-        headers = {"Cookie": cookie}
+        # The ssl kwarg is omitted rather than passed as None. websockets raises
+        # "ssl=None is incompatible with a wss:// URI" on an explicit None, and
+        # _negotiate_ws swallows that into a silent fall back to the candidate-less
+        # legacy POST — so verify_tls=true would quietly break NAT'd clients.
+        kwargs = {}
         ssl_ctx = self._ws_ssl(url)
+        if ssl_ctx is not None:
+            kwargs["ssl"] = ssl_ctx
+        headers = {"Cookie": cookie}
         try:
-            return await websockets.connect(url, additional_headers=headers, ssl=ssl_ctx)
+            return await websockets.connect(url, additional_headers=headers, **kwargs)
         except TypeError:  # websockets < 14 spells it differently
-            return await websockets.connect(url, extra_headers=headers, ssl=ssl_ctx)
+            return await websockets.connect(url, extra_headers=headers, **kwargs)
 
     async def _negotiate_http(self, pc: RTCPeerConnection, offer_b64: str) -> None:
         """Legacy one-shot exchange. The answer carries no candidates, so this only

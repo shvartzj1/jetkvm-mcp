@@ -249,6 +249,7 @@ jetkvm/keymap.py   per-layout character / key-combo → USB HID usage codes
 server.py          FastMCP server exposing the 25 tools
 smoke_test.py      live end-to-end check against a real device
 keymap_test.py     offline check of the layout tables (no device needed)
+signaling_test.py  offline check of the signaling websocket's TLS handling
 docs/              architecture + tool reference
 ```
 
