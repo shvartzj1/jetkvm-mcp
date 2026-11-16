@@ -245,6 +245,9 @@ class JetKVMClient:
         if ssl_ctx is not None:
             kwargs["ssl"] = ssl_ctx
         headers = {"Cookie": cookie}
+        # Newer firmware rejects the upgrade (403) unless Origin matches the device,
+        # as a browser would send it.
+        kwargs["origin"] = self.base_url.rstrip("/")
         try:
             return await websockets.connect(url, additional_headers=headers, **kwargs)
         except TypeError:  # websockets < 14 spells it differently
